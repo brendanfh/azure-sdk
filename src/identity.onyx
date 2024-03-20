@@ -1,0 +1,161 @@
+package azure.identity
+
+use core {Result, tprintf}
+use core.os
+use core.conv
+use core.io
+use core.time
+use core.encoding.json
+use http
+
+CredentialError :: union {
+    BadEnvironmentVariable: void;
+    ConnectionError: void;
+    DecodeError: void;
+}
+
+CredentialToken :: struct {
+    access_token: str;
+    expires_at_unix_seconds: u64;
+}
+
+CredentialProvider :: struct {
+    _get_access_token: (resource: str) -> Result(CredentialToken, CredentialError);
+
+    _cache: Map(str, CredentialToken);
+}
+
+#inject
+CredentialProvider.get_access_token :: (self: &CredentialProvider, resource: str) -> Result(str, CredentialError) {
+    self._cache[resource]->with([token] {
+        // Ensure there are at least 5 minutes of time remaining.
+        now := time.now()->to_epoch() / 1000 - 5 * 60;
+
+        if token.expires_at_unix_seconds < now {
+            return .{ Ok = token.access_token };
+        }
+    });
+
+    new_token := self._get_access_token(resource)?;
+    self._cache[resource] = new_token;
+
+    return .{ Ok = new_token.access_token };
+}
+
+
+default_credential_provider :: () -> CredentialProvider
+{
+    // Check for managed identity
+    if os.env("IDENTITY_ENDPOINT") {
+        return managed_identity_credential_provider();
+    }
+
+
+    // Default to using CLI
+    return azure_cli_credential_provider();
+}
+
+
+managed_identity_credential_provider :: () -> CredentialProvider
+{
+    credentials: CredentialProvider;
+    credentials._get_access_token = managed_identity_get_access_token;
+    credentials._cache->init();
+
+    return credentials;
+}
+
+azure_cli_credential_provider :: () -> CredentialProvider
+{
+    credentials: CredentialProvider;
+    credentials._get_access_token = azure_cli_get_access_token;
+    credentials._cache->init();
+
+    return credentials;
+}
+
+
+
+
+#local
+CredentialResponse :: struct {
+    accessToken: str;
+    expires_on: str;
+}
+
+
+#local
+managed_identity_get_access_token :: (resource: str) -> Result(CredentialToken, CredentialError)
+{
+    identity_endpoint := os.env("IDENTITY_ENDPOINT");
+    identity_header   := os.env("IDENTITY_HEADER");
+
+    if !identity_endpoint || !identity_header {
+        return .{ Err = .{ BadEnvironmentVariable = .{} } };
+    }
+
+    client := http.client.Client.{};
+    defer client->free();
+
+    response := http.client.request_builder(&client)
+        ->set_url(identity_endpoint->unwrap())
+        ->set_header("X-IDENTITY-HEADER", identity_header->unwrap())
+        ->set_query("resource", resource)
+        ->set_query("api_version", "2020-04-08")
+        ->send();
+
+    if response.status >= 400 {
+        return .{ Err = CredentialError.{ ConnectionError = .{} } };
+    }
+
+    credentials := response->as_json_into(CredentialResponse);
+
+    return .{ Ok = credential_response_into_credential_token(credentials) };
+}
+
+#local
+azure_cli_get_access_token :: (resource: str) -> Result(CredentialToken, CredentialError)
+{
+    // Need to run `/bin/sh -c 'az account get-access-token --resource ${resource}'`
+    inner_command := tprintf(
+        "az account get-access-token --resource {}",
+        resource
+    );
+
+    args := .[ "-c", inner_command ];
+    p := os.process_spawn("/bin/sh", args);
+
+    reader := io.reader_make(&p);
+    defer io.reader_free(&reader);
+
+    switch os.process_wait(&p) {
+        case .Success {
+            result := reader->read_all();
+
+            credentials: CredentialResponse;
+            if json.decode_into(result, &credentials).kind != .None {
+                return .{ Err = .{ DecodeError = .{} } };
+            }
+
+            return .{ Ok = credential_response_into_credential_token(credentials) };
+        }
+
+        case #default {
+            return .{ Err = .{ ConnectionError = .{} } };
+        }
+    }
+}
+
+#local
+credential_response_into_credential_token :: (c: CredentialResponse) -> CredentialToken 
+{
+    return .{
+        access_token = c.accessToken,
+        expires_at_unix_seconds = conv.parse(u64, c.expires_on) ?? 0,
+    };
+}
+
+
+
+
+
