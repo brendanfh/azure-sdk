@@ -3,7 +3,7 @@ package {
     author "Brendan Hansen" 
     url "" 
     description "An (incomplete) SDK for Azure Resources" 
-    version "0.0.1" 
+    version "0.0.2" 
 }
 
 config {
