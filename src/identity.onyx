@@ -12,20 +12,22 @@ CredentialError :: union {
     BadEnvironmentVariable: void
     ConnectionError: void
     DecodeError: void
+    Other: str
 }
 
 CredentialToken :: struct {
     access_token: str
     expires_at_unix_seconds: u64
+    resource: str
 }
 
 CredentialProvider :: struct {
-    _get_access_token: (resource: str, api_version: str) -> Result(CredentialToken, CredentialError)
+    _get_access_token: (resource: str) -> Result(CredentialToken, CredentialError)
 
     _cache: Map(str, CredentialToken)
 }
 
-CredentialProvider.get_access_token :: (self: &CredentialProvider, resource: str, api_version: str) -> Result(str, CredentialError) {
+CredentialProvider.get_access_token :: (self: &CredentialProvider, resource: str) -> Result(str, CredentialError) {
     self._cache[resource]->with([token] {
         // Ensure there are at least 5 minutes of time remaining.
         now := time.now()->to_epoch() / 1000 - 5 * 60
@@ -35,28 +37,26 @@ CredentialProvider.get_access_token :: (self: &CredentialProvider, resource: str
         }
     })
 
-    new_token := self._get_access_token(resource, api_version)?
+    new_token := self._get_access_token(resource)?
+    new_token.resource = resource
     self._cache[resource] = new_token
 
     return .{ Ok = new_token.access_token }
 }
 
 
-default_credential_provider :: () -> CredentialProvider
-{
+default_credential_provider :: () -> CredentialProvider {
     // Check for managed identity
     if os.env("IDENTITY_ENDPOINT") {
         return managed_identity_credential_provider()
     }
-
 
     // Default to using CLI
     return azure_cli_credential_provider()
 }
 
 
-managed_identity_credential_provider :: () -> CredentialProvider
-{
+managed_identity_credential_provider :: () -> CredentialProvider {
     credentials: CredentialProvider
     credentials._get_access_token = managed_identity_get_access_token
     credentials._cache->init()
@@ -64,8 +64,7 @@ managed_identity_credential_provider :: () -> CredentialProvider
     return credentials
 }
 
-azure_cli_credential_provider :: () -> CredentialProvider
-{
+azure_cli_credential_provider :: () -> CredentialProvider {
     credentials: CredentialProvider
     credentials._get_access_token = azure_cli_get_access_token
     credentials._cache->init()
@@ -74,20 +73,10 @@ azure_cli_credential_provider :: () -> CredentialProvider
 }
 
 
-
-
 #local
-CredentialResponse :: struct {
-    accessToken: str
-    expires_on: str
-}
-
-
-#local
-managed_identity_get_access_token :: (resource: str, api_version: str) -> Result(CredentialToken, CredentialError)
-{
-    identity_endpoint := os.env("IDENTITY_ENDPOINT")
-    identity_header   := os.env("IDENTITY_HEADER")
+managed_identity_get_access_token :: (resource: str) -> Result(CredentialToken, CredentialError) {
+    identity_endpoint := os.env("IDENTITY_ENDPOINT")->transform(x => str.temp_copy(x))
+    identity_header   := os.env("IDENTITY_HEADER")->transform(x => str.temp_copy(x))
 
     if !identity_endpoint || !identity_header {
         return .{ Err = .{ BadEnvironmentVariable = .{} } }
@@ -98,61 +87,68 @@ managed_identity_get_access_token :: (resource: str, api_version: str) -> Result
 
     response := http.client.request_builder(&client)
         ->set_url(identity_endpoint->unwrap())
+        ->set_method(.Get)
         ->set_header("X-IDENTITY-HEADER", identity_header->unwrap())
         ->set_query("resource", resource)
-        ->set_query("api_version", api_version)
+        ->set_query("api-version", "2019-08-01")
         ->send()
 
     if response.status >= 400 {
         return .{ Err = CredentialError.{ ConnectionError = .{} } }
     }
 
-    credentials := response->as_json_into(CredentialResponse)
+    credentials := response->as_json_into(struct {
+        access_token: str
+        expires_on: str
+        resource: str
+        token_type: str
+        client_id: str
+    })
 
-    return .{ Ok = credential_response_into_credential_token(credentials) }
+    return .{
+        Ok = .{
+            access_token = credentials.access_token
+            expires_at_unix_seconds = conv.parse(u64, credentials.expires_on) ?? 0
+        }
+    }
 }
 
 #local
-azure_cli_get_access_token :: (resource: str, api_version: str) -> Result(CredentialToken, CredentialError)
-{
+azure_cli_get_access_token :: (resource: str) -> Result(CredentialToken, CredentialError) {
     // Need to run `/bin/sh -c 'az account get-access-token --resource ${resource}'`
     inner_command := tprintf(
         "az account get-access-token --resource {}"
         resource
     )
 
-    args := .[ "-c", inner_command ]
-    p := os.process_spawn("/bin/sh", args)
-
-    reader := io.reader_make(&p)
-    defer io.reader_free(&reader)
-
-    switch os.process_wait(&p) {
-        case .Success {
-            result := reader->read_all()
-
+    cmd := os.command()
+    cmd->path("/bin/sh")
+    cmd->args(.["-c", inner_command])
+    switch cmd->output() {
+        case .Ok as result {
+            CredentialResponse :: struct {
+                accessToken: str
+                expires_on: str
+            }
             credentials: CredentialResponse
             if json.decode_into(result, &credentials).kind != .None {
                 return .{ Err = .{ DecodeError = .{} } }
             }
 
-            return .{ Ok = credential_response_into_credential_token(credentials) }
+            return .{
+                Ok = .{
+                    access_token = credentials.accessToken
+                    expires_at_unix_seconds = conv.parse(u64, credentials.expires_on) ?? 0
+                }
+            }
         }
 
-        case #default {
-            return .{ Err = .{ ConnectionError = .{} } }
+        case .Err as err {
+            return .{ Err = .{ Other = err.output } }
         }
     }
 }
 
-#local
-credential_response_into_credential_token :: (c: CredentialResponse) -> CredentialToken 
-{
-    return .{
-        access_token = c.accessToken
-        expires_at_unix_seconds = conv.parse(u64, c.expires_on) ?? 0
-    }
-}
 
 
 
