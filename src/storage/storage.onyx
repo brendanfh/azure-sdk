@@ -1,0 +1,219 @@
+package azure.storage
+
+use core {Result, tprintf, time}
+use core.encoding.xml
+use azure.identity
+use http
+
+#local {
+    AZ_RESOURCE_NAME :: "https://storage.azure.com/"
+    AZ_API_VERSION   :: "2024-11-04"
+    TIME_FORMAT      :: "%a, %d %b %Y %H:%M:%S GMT"
+}
+
+StorageClient.make :: (uri: str, creds: &identity.CredentialProvider) => #Self.{
+    creds
+    uri
+    http_client = new(http.client.Client.{})
+}
+
+//
+// Containers
+//
+
+StorageClient.list_containers :: (self: #Self) -> Result([] ContainerInfo, str) {
+    token := get_token(self.credentials)?
+
+    res := base_request(self.http_client, token)
+        ->set_url(self.storage_uri)
+        ->set_query("comp", "list")
+        ->send()
+
+    if !res || res.status >= 400 {
+        return .{ Err = res.body }
+    }
+
+    use doc := xml.parse(res.body)
+        |> Result.transform_err(err => tprintf("XML Error: {}", err))?
+
+    containers := doc->child_with_name(0, "Containers")
+        |> Optional.value_or(0)
+        |> xml.Document.children(&doc, _)
+        |> Iterator.map((cont_idx, [doc]) => {
+            name := doc.elements[doc->child_with_name(cont_idx, "Name")!].children[0].Text
+                |> Optional.value_or("unknown")
+                |> str.copy()
+
+            return ContainerInfo.{ name }
+        })
+        |> Iterator.collect()
+
+    return .{ Ok = containers }
+}
+
+StorageClient.create_container :: (self: #Self, container: str) -> Result(bool, str) {
+    token := get_token(self.credentials)?
+
+    res := base_request(self.http_client, token)
+        ->set_method(.Put)
+        ->set_url(tprintf("{}{}", self.storage_uri, container))
+        ->set_query("restype", "container")
+        ->send()
+
+    if !res || res.status >= 400 {
+        return .{ Err = res.body }
+    }
+
+    return .{ Ok = true }
+}
+
+StorageClient.delete_container :: (self: #Self, container: str) -> Result(bool, str) {
+    token := get_token(self.credentials)?
+
+    res := base_request(self.http_client, token)
+        ->set_method(.Delete)
+        ->set_url(tprintf("{}{}", self.storage_uri, container))
+        ->set_query("restype", "container")
+        ->send()
+
+    if !res || res.status >= 400 {
+        return .{ Err = res.body }
+    }
+
+    return .{ Ok = true }
+}
+
+
+//
+// Blobs
+//
+
+StorageClient.list_blobs_in_container :: (self: #Self, container: str) -> Result([] BlobInfo, str) {
+    token := get_token(self.credentials)?
+
+    res := base_request(self.http_client, token)
+        ->set_url(tprintf("{}{}", self.storage_uri, container))
+        ->set_query("restype", "container")
+        ->set_query("comp", "list")
+        ->send()
+    
+    if !res || res.status >= 400 {
+        return .{ Err = res.body }
+    }
+
+    use doc := xml.parse(res.body)
+        ->transform_err(err => tprintf("XML Error: {}", err))?
+
+    names := doc->child_with_name(0, "Blobs")
+        |> Optional.value_or(0)
+        |> xml.Document.children(&doc, _)
+        |> Iterator.map((blob_idx, [doc]) => {
+            name := doc.elements[doc->child_with_name(blob_idx, "Name")!].children[0].Text
+                |> Optional.value_or("unknown")
+                |> str.copy()
+
+            props := doc->child_with_name(blob_idx, "Properties")!
+
+            last_modified := doc.elements[doc->child_with_name(props, "Last-Modified")!].children[0].Text
+                |> Optional.and_then(x => time.strptime(x, TIME_FORMAT))
+                |> Optional.value_or(time.Timestamp.{})
+
+            created_at := doc.elements[doc->child_with_name(props, "Creation-Time")!].children[0].Text
+                |> Optional.and_then(x => time.strptime(x, TIME_FORMAT))
+                |> Optional.value_or(time.Timestamp.{})
+
+            return BlobInfo.{ name, last_modified, created_at }
+        })
+        |> Iterator.collect()
+
+    return .{ Ok = names }
+}
+
+StorageClient.get_blob :: (self: #Self, container: str, blob: str) -> Result(BlobContent, str) {
+    token := get_token(self.credentials)?
+
+    res := base_request(self.http_client, token)
+        ->set_url(tprintf("{}{}/{}", self.storage_uri, container, blob))
+        ->send()
+    
+    if !res || res.status >= 400 {
+        return .{ Err = res.body }
+    }
+
+    modified := res.headers->get("Last-Modified")
+        |> time.strptime(TIME_FORMAT)
+        |> Optional.value_or(time.Timestamp.{})
+
+    type := switch res.headers->get("x-ms-blob-type") {
+        case "PageBlob"   => BlobType.Page
+        case "AppendBlob" => BlobType.Append
+        case _            => BlobType.Block
+    }
+
+    return .{
+        Ok = .{
+            res.body
+            modified
+            type
+        }
+    }
+}
+
+StorageClient.put_blob :: (self: #Self, container: str, blob: str, content: [] u8) -> Result(bool, str) {
+    token := get_token(self.credentials)?
+
+    res := base_request(self.http_client, token)
+        ->set_method(.Put)
+        ->set_url(tprintf("{}{}/{}", self.storage_uri, container, blob))
+        ->set_header("x-ms-blob-type", "BlockBlob")
+        ->set_body(content)
+        ->send()
+    
+    if !res || res.status >= 400 {
+        return .{ Err = res.body }
+    }
+
+    return .{ Ok = true }
+}
+
+
+DeletionStatus :: enum { Permanent; Soft; }
+
+StorageClient.delete_blob :: (self: #Self, container: str, blob: str) -> Result(DeletionStatus, str) {
+    token := get_token(self.credentials)?
+
+    res := base_request(self.http_client, token)
+        ->set_method(.Delete)
+        ->set_url(tprintf("{}{}/{}", self.storage_uri, container, blob))
+        ->send()
+
+    if !res || res.status >= 400 {
+        return .{ Err = res.body }
+    }
+
+    soft := res.headers->get("x-ms-delete-type-permanent") == "false"
+
+    return .{ 
+        Ok = DeletionStatus.Soft if soft else .Permanent
+    }
+}
+
+
+
+#local
+get_token :: (creds: &identity.CredentialProvider) -> Result(str, str) {
+    token := creds
+        ->get_access_token(AZ_RESOURCE_NAME)
+        ->transform_err(err => tprintf("Credential Error: {}", err))?
+
+    return .{ Ok = token }
+}
+
+#local
+base_request :: (cli: &http.client.Client, token: str) => {
+    return http.client.request_builder(cli)
+        ->set_method(.Get)
+        ->set_header("Authorization", tprintf("Bearer {}", token))
+        ->set_header("x-ms-version", AZ_API_VERSION)
+        ->set_header("Date", time.now()->format(TIME_FORMAT))
+}

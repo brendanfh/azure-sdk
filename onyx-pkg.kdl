@@ -12,7 +12,7 @@ config {
 }
 
 dependencies {
-    http-client "0.0.34" git="http://github.com/onyx-lang/pkg-http-client" 
+    http-client "0.0.35" git="http://github.com/onyx-lang/pkg-http-client" 
 }
 
 lsp {

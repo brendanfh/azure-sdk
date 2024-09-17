@@ -1,0 +1,26 @@
+#load "./module"
+#load "./lib/packages"
+
+use azure.identity
+use azure.storage
+use core {println, printf}
+
+main :: () {
+    provider := identity.default_credential_provider()
+
+    storage_client := storage.StorageClient.make(
+        "https://onyxblobtesting.blob.core.windows.net/", &provider
+    )
+
+    // storage_client->create_container("fromapi") |> printf("CREATE CONTAINER: {}\n", _)
+    // storage_client->delete_container("fromapi") |> println()
+
+    // storage_client->put_blob("fromapi", "upload_test.txt", "This is the content of the test file.") |> println()
+    // storage_client->delete_blob("test", "upload_test.txt") |> println()
+
+    for cont in storage_client->list_containers().Ok? {
+        for blob in storage_client->list_blobs_in_container(cont.name).Ok? {
+            printf("{}/{}\n", cont.name, blob.name)
+        }
+    }
+}

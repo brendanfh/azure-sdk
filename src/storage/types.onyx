@@ -1,0 +1,35 @@
+package azure.storage
+
+use core {Pair, Result, tprintf, time}
+use core.encoding.xml
+use azure.identity
+use http
+
+StorageClient :: struct {
+    credentials: &identity.CredentialProvider
+    storage_uri: str
+
+    http_client: &http.client.Client
+}
+
+ContainerInfo :: struct {
+    name: str
+}
+
+BlobType :: enum {
+    Block
+    Page
+    Append
+}
+
+BlobInfo :: struct {
+    name: str
+    last_modified: time.Timestamp
+    created_at: time.Timestamp
+}
+
+BlobContent :: struct {
+    data: [] u8
+    last_modified: time.Timestamp
+    type: BlobType
+}

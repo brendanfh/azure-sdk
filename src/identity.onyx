@@ -128,7 +128,7 @@ azure_cli_get_access_token :: (resource: str) -> Result(CredentialToken, Credent
         case .Ok as result {
             CredentialResponse :: struct {
                 accessToken: str
-                expires_on: str
+                expiresOn: str
             }
             credentials: CredentialResponse
             if json.decode_into(result, &credentials).kind != .None {
@@ -138,7 +138,7 @@ azure_cli_get_access_token :: (resource: str) -> Result(CredentialToken, Credent
             return .{
                 Ok = .{
                     access_token = credentials.accessToken
-                    expires_at_unix_seconds = conv.parse(u64, credentials.expires_on) ?? 0
+                    expires_at_unix_seconds = conv.parse(u64, credentials.expiresOn) ?? 0
                 }
             }
         }
