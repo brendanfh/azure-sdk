@@ -17,7 +17,7 @@ dependencies {
 
 lsp {
     mode "project" 
-    source_files "test" 
+    source_files "example/test" 
     include_dirs "" 
     working_dir "." 
 }

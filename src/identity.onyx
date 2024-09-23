@@ -5,6 +5,7 @@ use core.os
 use core.conv
 use core.io
 use core.time
+use core.string
 use core.encoding.json
 use http
 
@@ -24,6 +25,7 @@ CredentialToken :: struct {
 CredentialProvider :: struct {
     _get_access_token: (resource: str) -> Result(CredentialToken, CredentialError)
 
+    _pool:  string.StringPool
     _cache: Map(str, CredentialToken)
 }
 
@@ -38,10 +40,16 @@ CredentialProvider.get_access_token :: (self: &CredentialProvider, resource: str
     })
 
     new_token := self._get_access_token(resource)?
-    new_token.resource = resource
+    new_token.resource = self._pool->add(resource)
+    new_token.access_token = self._pool->add(new_token.access_token)
     self._cache[resource] = new_token
 
     return .{ Ok = new_token.access_token }
+}
+
+CredentialProvider.destroy :: (self: &#Self) {
+    self._cache->free()
+    self._pool->free()
 }
 
 
@@ -56,19 +64,22 @@ default_credential_provider :: () -> CredentialProvider {
 }
 
 
-managed_identity_credential_provider :: () -> CredentialProvider {
-    credentials: CredentialProvider
-    credentials._get_access_token = managed_identity_get_access_token
+#local
+base_credential_provider :: () -> (credentials: CredentialProvider) {
     credentials._cache->init()
+    credentials._pool = string.StringPool.make(allocator = context.allocator)
+    return
+}
 
+managed_identity_credential_provider :: () -> CredentialProvider {
+    credentials := base_credential_provider()
+    credentials._get_access_token = managed_identity_get_access_token
     return credentials
 }
 
 azure_cli_credential_provider :: () -> CredentialProvider {
-    credentials: CredentialProvider
+    credentials := base_credential_provider()
     credentials._get_access_token = azure_cli_get_access_token
-    credentials._cache->init()
-
     return credentials
 }
 
@@ -92,6 +103,7 @@ managed_identity_get_access_token :: (resource: str) -> Result(CredentialToken, 
         ->set_query("resource", resource)
         ->set_query("api-version", "2019-08-01")
         ->send()
+    defer response->free()
 
     if response.status >= 400 {
         return .{ Err = CredentialError.{ ConnectionError = .{} } }

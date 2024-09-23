@@ -1,5 +1,5 @@
-#load "./module"
-#load "./lib/packages"
+#load "./../module"
+#load "./../lib/packages"
 
 use azure.identity
 use azure.storage
@@ -18,8 +18,8 @@ main :: () {
     // storage_client->put_blob("fromapi", "upload_test.txt", "This is the content of the test file.") |> println()
     // storage_client->delete_blob("test", "upload_test.txt") |> println()
 
-    for cont in storage_client->list_containers().Ok? {
-        for blob in storage_client->list_blobs_in_container(cont.name).Ok? {
+    for cont in storage_client->list_containers()! {
+        for blob in storage_client->list_blobs_in_container(cont.name)! {
             printf("{}/{}\n", cont.name, blob.name)
         }
     }
